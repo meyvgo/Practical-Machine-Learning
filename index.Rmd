@@ -1,0 +1,228 @@
+---
+title: "Explanation of Exercise Prediction Model"
+author: "Meyvgo"
+date: "12/3/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+## Load libraries used in this analysis
+library(knitr)
+opts_chunk$set(echo=FALSE, eval=TRUE, include=FALSE)
+library(caret)
+library(dplyr)
+
+## These next libraries are used for parallel processing
+library(foreach)
+library(iterators)
+library(parallel)
+library(doParallel)
+
+## Set seed for reproducibility
+set.seed(355324)
+
+```
+
+# Overview
+
+This report provides an explanation of a model built to predict the manner in which a person did a barbell exercise (correctly, or incorrectly in one of four ways) based on data from accelerometers placed on their belt, forearm, arm, and dumbell. The final model used the random forest method to predict at 99.55% accuracy rate and an OOB estimate of error rate of 0.32%. 
+
+The code used in this project can be found in the appendix at the end of this document.
+
+# The Data
+
+The data used in this project come from this source:  <http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har>. This data consists of readings taken from accelerometer sensors placed on the belt, forearm, arm, and dumbell of six different people while they were performing a set of unilateral dumbbell bicepts curls in one of five different fashions. One of the ways of performing the exercise was correct, while the other four were incorrect in different ways.
+
+```{r getData}
+## Read in the data, converting blank and #DIV/0! values to NA
+training<-read.csv("Data/pml-training.csv", na.strings=c("#DIV/0!",""))
+testing<-read.csv("Data/pml-testing.csv", na.strings=c("#DIV/0!", ""))
+
+```
+
+The data was read in as provided in separate training and test sets. The model building as described below was performed on the training set.
+
+## Exploratory Data Analysis
+
+A review of the provided data shows a training set of 19,622 observations and 160 variables. 
+
+```{r exploreData1, include=TRUE}
+## Get information about the training data set 
+print(dim(training)) ## dimensions
+
+```
+
+The variables include an observation number, the user name, timestamps, and observation windows, along with data from the sensors and summary data computed from the sensors (from the original source). For example, here are the first 25 variables:
+
+```{r exploreData2, include=TRUE}
+print(names(training)[1:25]) ## names of first 25 columns
+
+```
+
+There are a large number of NA values in the data.
+
+```{r exploreData3, include=TRUE}
+print(sum(is.na(training))) ## number of NAs
+
+```
+
+
+## Preprocessing
+
+```{r preProcess}
+## Remove variables that won't be useful as predictors--obs, user_name, timestamps, windows
+new_training<-training[,8:160]
+
+## Remove columns that are over 95% NAS
+new_training<-as.data.frame(lapply(new_training, function(x) {ifelse(x=="NA", NA, x)}))
+nas<-lapply(new_training, function(x) {ifelse((sum(is.na(x))/nrow(new_training)*100)>95,1,0)})
+new_training<-select(new_training,-which(nas>0))        
+dim(new_training)
+
+## Preprocess using PCA
+ind<-which(names(new_training)=="classe")
+preProc<-preProcess(new_training[,-ind], method="pca")
+trainingPCA<-predict(preProc, new_training[,-ind])
+
+```
+
+
+Before building a prediction model, it would be helpful to reduce the number of variables. We'll start by removing variables that won't be useful predictors like observation, user id, timestamps, and window variables (the first 7 columns). Then we remove columns from the dataset that consist of at least 95% NAs.
+
+This reduces the number of variables from 160 to 53.
+
+```{r preProcessDim1, include=TRUE}
+## See how our preprocessing has reduced the variables
+print(dim(new_training))
+
+```
+
+We did this rather than imputing missing and error values because an examination of the missing values showed them to be associated with summary statistics calculated at a measurement boundry by the authors of the original study. We decided to use just the raw sensor data instead in our prediction.
+
+We also decided to try principal component analysis (PCA) to remove predictors that are highly correlated and use only a combination of predictors that captures the most information possible. We used PCA built into the caret package in R, and were able to create a preprocessed data set with 25 principal components.
+
+```{r preProcessDim2, include=TRUE}
+## See how our PCA has reduced the variables
+print(dim(trainingPCA)) ## dimensions of data set after PCA
+
+```
+
+# The Model
+
+## Configuration
+
+```{r configure}
+## Configure parallel processing and trainControl object
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+fitControl <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+
+```
+
+We use parallel processing to help speed up the model building. 
+
+We configure our model using k-fold cross-validation with 5 folds, as five-fold cross-validation is recommended as a value that provides a good compromise between bias and variance (see The Elements of Statistical Learning). We do this using the trainControl function in the carat package.
+
+We chose k-fold cross-validation instead of bootstrapping as a resampling method because it is less computationally intensive. This tradeoff can sometimes reduce model accuracy but we were able to get good accuracy using 5-fold cross-validation.
+
+
+## Model Building
+
+```{r fitModel, cache=TRUE}
+## Develop Random Forest training model
+y<-as.factor(new_training$classe)
+x<-new_training[,-ind]
+modelFit<-train(x, y, method="rf", data=trainingPCA, trControl=fitControl,
+                tuneGrid=data.frame(mtry=5))
+
+```
+
+We chose a random forest method for our model because it is considered one of the top performing algorithms (see The Elements of Statistical Learning). It produces high accuracy because it builds a large collection of trees and averages them.
+
+We decided to set the number of variables randomly sampled as candidates at each split of the random forest model (mtry) to a constant, because using the default greatly increased the time to build the model. Choosing mtry=5 significantly reduced the runtime while still providing accuracy of 99.55%.
+
+```{r finalModel, include=TRUE}
+## Show the final model
+print(modelFit)
+
+```
+
+## OOB Estimate of Error
+
+We used the train function in the caret package to create our model. By printing the final model produced, we see the OOB estimate of error rate is 0.32%. (Note: below, we print the finalModel call and type, number of trees (500), OOB estimate of error, and confusion matrix separately as printing the final model directly didn't provide the same summary output in knit to HTML as it did in the console.)
+
+```{r finalModelOOB, include=TRUE}
+## Display aspects of the final model
+print(modelFit$finalModel[1:2]) ## This prints call and type
+print(modelFit$finalModel$ntree) ## This prints the number of trees
+print(modelFit$finalModel$err.rate[modelFit$finalModel$ntree,1]) ## This is the OOB estimate
+print(modelFit$finalModel$confusion) ## This is the confusion matrix
+
+```
+
+## Model Comparison
+
+```{r comparisonModel, cache=TRUE}
+## Model for comparison
+## Create training and validation data sets
+inTraining<-createDataPartition(new_training$classe, p=0.75, list=FALSE)
+train1<-new_training[inTraining,]
+test1<-new_training[-inTraining,]
+
+## Set up x and y for caret train function
+i1<-which(names(train1)=="classe")
+y1<-as.factor(train1$classe)
+x1<-train1[,-i1]
+
+## Develop model
+mf1<-train(x1, y1, method="rpart")
+
+## Use the model to predict classe on the validation set
+pred1<-predict(mf1, test1)
+
+## Find the confusionMatrix generated from the observed and predicted values
+cm1<-confusionMatrix(as.factor(pred1),as.factor(test1$classe))
+
+```
+
+For comparison, we created a second model by partitioning our initial training data set into separate training and validation sets. For this model we used the "rpart" method in the train function of the caret package, which is a classification and regression tree model. We built the model on our new (partitioned) training data set, and then used it to predict classe values on the withheld validation set.
+
+With this model, we see that the accuracy is 51.02%.
+
+```{r comparisonModelData, include=TRUE}
+## Show the final comparison model
+print(mf1)
+
+```
+
+The accuracy of the confusionMatrix generated from the observed and predicted values is 49.2%.
+
+```{r comparisonModelData2, include=TRUE}
+## Show the accuracy of the confusionMatrix
+print(cm1$overall['Accuracy']) ## confusionMatrix accuracy
+
+```
+
+So the OOB error rate, calculated as (1-accuracy of the confusionMatrix generated from the observed and predicted values), is 50.8%. 
+
+
+```{r comparisonModelData3, include=TRUE}
+## Show the calculated OOB error rate
+print(1-cm1$overall['Accuracy']) ## OOB error rate
+
+```
+
+Clearly our original model is the prefered one.
+
+## Prediction
+
+Using the chosen model (modelFit) resulted in 100% accurate predictions when applied to the original provided testing data set.
+
+\newpage
+
+# Appendix
+Here is the code used in this project.
+
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE, include=TRUE}
+```
